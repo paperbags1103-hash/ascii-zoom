@@ -380,6 +380,8 @@
         const text = els.chatInput.value.trim();
         if (!text) return;
         if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+        // Show immediately (don't wait for server roundtrip)
+        addChatMessage(state.name || 'Me', text, true);
         state.ws.send(JSON.stringify({ type: 'chat', text }));
         els.chatInput.value = '';
       }
@@ -515,8 +517,9 @@
             }
             case 'chat': {
               if (!data.text) break;
-              const own = !!(state.id && data.id && data.id === state.id);
-              addChatMessage(data.name || 'Anonymous', data.text, own);
+              // Skip own messages — already shown locally in sendChat()
+              if (state.id && data.id === state.id) break;
+              addChatMessage(data.name || 'Anonymous', data.text, false);
               break;
             }
             default:
