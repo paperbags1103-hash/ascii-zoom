@@ -8,6 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
+import http
 import websockets
 from websockets.exceptions import ConnectionClosed
 
@@ -207,6 +208,14 @@ async def handle_client(websocket: websockets.WebSocketServerProtocol, path: Opt
             LOGGER.info("leave room=%s participant=%s(%s)", room_id, participant_name, participant_id)
 
 
+async def health_check_handler(connection, request):
+    """Handle HTTP health checks from Render/load balancers."""
+    if request.path == "/health" or request.method in ("HEAD", "GET"):
+        if request.path != "/" and not request.path.startswith("/room/"):
+            return connection.respond(http.HTTPStatus.OK, "OK\n")
+    # For /room/* paths and /, let websockets handle the upgrade
+
+
 async def run_server(host: str, port: int) -> None:
     stop = asyncio.Future()
 
@@ -221,7 +230,13 @@ async def run_server(host: str, port: int) -> None:
         except NotImplementedError:
             pass
 
-    async with websockets.serve(handle_client, host, port, max_size=2**20, ping_interval=20, ping_timeout=20):
+    async with websockets.serve(
+        handle_client, host, port,
+        max_size=2**20,
+        ping_interval=20,
+        ping_timeout=20,
+        process_request=health_check_handler,
+    ):
         LOGGER.info("ASCII Zoom server running on ws://%s:%s", host, port)
         await stop
 
