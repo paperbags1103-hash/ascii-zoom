@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""ASCII Zoom WebSocket server — aiohttp-based (handles HTTP health checks + WebSocket)."""
 import argparse
 import asyncio
 import json
@@ -8,21 +9,17 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-import http
-import websockets
-from websockets.exceptions import ConnectionClosed
-
+from aiohttp import web, WSMsgType
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 LOGGER = logging.getLogger("ascii-zoom-server")
-MAX_FRAME_CHARS = 6000
 
 
 @dataclass
 class Participant:
     participant_id: str
     name: str
-    websocket: websockets.WebSocketServerProtocol
+    ws: web.WebSocketResponse
 
 
 @dataclass
@@ -38,17 +35,14 @@ class RoomManager:
 
     async def join(self, room_id: str, participant: Participant) -> Room:
         async with self.lock:
-            room = self.rooms.get(room_id)
-            if room is None:
-                room = Room(room_id=room_id)
-                self.rooms[room_id] = room
+            room = self.rooms.setdefault(room_id, Room(room_id=room_id))
             room.participants[participant.participant_id] = participant
             return room
 
     async def leave(self, room_id: str, participant_id: str) -> Optional[Room]:
         async with self.lock:
             room = self.rooms.get(room_id)
-            if room is None:
+            if not room:
                 return None
             room.participants.pop(participant_id, None)
             if not room.participants:
@@ -64,196 +58,138 @@ class RoomManager:
 ROOM_MANAGER = RoomManager()
 
 
-def extract_room_id(path: str) -> Optional[str]:
-    if not path.startswith("/room/"):
-        return None
-    room_id = path.split("/room/", 1)[1].strip().split("/", 1)[0]
-    if not room_id:
-        return None
-    return room_id[:64]
-
-
-async def safe_send(ws: websockets.WebSocketServerProtocol, payload: dict) -> bool:
+async def safe_send(ws: web.WebSocketResponse, payload: dict) -> bool:
     try:
-        await ws.send(json.dumps(payload))
+        await ws.send_json(payload)
         return True
-    except ConnectionClosed:
-        return False
     except Exception:
-        LOGGER.exception("failed to send payload")
         return False
 
 
 async def broadcast(room: Room, payload: dict, exclude_id: Optional[str] = None) -> None:
-    if not room.participants:
-        return
-
-    dead_ids = []
-    sends = []
-    for pid, participant in room.participants.items():
-        if exclude_id is not None and pid == exclude_id:
+    dead = []
+    for pid, p in list(room.participants.items()):
+        if pid == exclude_id:
             continue
-        sends.append((pid, asyncio.create_task(safe_send(participant.websocket, payload))))
-
-    for pid, task in sends:
-        ok = await task
+        ok = await safe_send(p.ws, payload)
         if not ok:
-            dead_ids.append(pid)
-
-    if dead_ids:
-        for pid in dead_ids:
-            await ROOM_MANAGER.leave(room.room_id, pid)
+            dead.append(pid)
+    for pid in dead:
+        await ROOM_MANAGER.leave(room.room_id, pid)
 
 
-async def handle_client(websocket: websockets.WebSocketServerProtocol, path: Optional[str] = None) -> None:
+async def health_handler(request: web.Request) -> web.Response:
+    return web.Response(text="OK", status=200)
+
+
+async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+    room_id = request.match_info.get("room_id", "").strip()
+    if not room_id:
+        raise web.HTTPBadRequest(reason="room_id required")
+
+    ws = web.WebSocketResponse(heartbeat=20)
+    await ws.prepare(request)
+
     participant_id = uuid.uuid4().hex[:8]
-    room_id = ""
     participant_name = "Anonymous"
     joined = False
 
     try:
-        actual_path = path or getattr(websocket, "path", "")
-        room_id = extract_room_id(actual_path) or ""
-        if not room_id:
-            await safe_send(websocket, {"type": "error", "message": "Invalid path. Use /room/<room_id>"})
-            await websocket.close(code=1008, reason="invalid path")
-            return
+        # Wait for join message
+        msg = await asyncio.wait_for(ws.receive(), timeout=10)
+        if msg.type != WSMsgType.TEXT:
+            await ws.close()
+            return ws
 
-        raw_join = await asyncio.wait_for(websocket.recv(), timeout=10)
-        try:
-            join_msg = json.loads(raw_join)
-        except json.JSONDecodeError:
-            await safe_send(websocket, {"type": "error", "message": "Invalid JSON in join message"})
-            await websocket.close(code=1002, reason="invalid json")
-            return
+        data = json.loads(msg.data)
+        if data.get("type") != "join":
+            await ws.close()
+            return ws
 
-        if not isinstance(join_msg, dict) or join_msg.get("type") != "join":
-            await safe_send(websocket, {"type": "error", "message": "First message must be join"})
-            await websocket.close(code=1008, reason="missing join")
-            return
-
-        participant_name = str(join_msg.get("name", "Anonymous")).strip()[:32] or "Anonymous"
-        participant = Participant(participant_id=participant_id, name=participant_name, websocket=websocket)
+        participant_name = str(data.get("name", "Anonymous"))[:32] or "Anonymous"
+        participant = Participant(participant_id=participant_id, name=participant_name, ws=ws)
         room = await ROOM_MANAGER.join(room_id, participant)
         joined = True
 
         LOGGER.info("join room=%s participant=%s(%s)", room_id, participant_name, participant_id)
 
-        await safe_send(
-            websocket,
-            {
-                "type": "welcome",
-                "id": participant_id,
-                "room": room_id,
-                "participants": [
-                    {"id": p.participant_id, "name": p.name}
-                    for p in room.participants.values()
-                ],
-            },
-        )
+        # Send welcome
+        await safe_send(ws, {
+            "type": "welcome",
+            "id": participant_id,
+            "room": room_id,
+            "participants": [
+                {"id": p.participant_id, "name": p.name}
+                for p in room.participants.values()
+            ],
+        })
 
-        await broadcast(
-            room,
-            {
-                "type": "participant_join",
-                "participant": {"id": participant_id, "name": participant_name},
-            },
-            exclude_id=participant_id,
-        )
+        # Notify others
+        await broadcast(room, {
+            "type": "participant_join",
+            "participant": {"id": participant_id, "name": participant_name},
+        }, exclude_id=participant_id)
 
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                await safe_send(websocket, {"type": "error", "message": "Invalid JSON message"})
-                continue
-
-            if not isinstance(data, dict):
-                continue
-
-            msg_type = data.get("type")
-            if msg_type == "frame":
-                frame = str(data.get("frame", ""))[:MAX_FRAME_CHARS]
-                muted = bool(data.get("muted", False))
-                current_room = await ROOM_MANAGER.get_room(room_id)
-                if current_room is None:
+        # Main message loop
+        async for msg in ws:
+            if msg.type == WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                except json.JSONDecodeError:
                     continue
-                await broadcast(
-                    current_room,
-                    {
-                        "type": "frame",
-                        "id": participant_id,
-                        "name": participant_name,
-                        "frame": frame,
-                        "muted": muted,
-                    },
-                    exclude_id=participant_id,
-                )
-            elif msg_type == "ping":
-                await safe_send(websocket, {"type": "pong"})
-            elif msg_type == "leave":
+
+                msg_type = data.get("type")
+                if msg_type == "frame":
+                    current_room = await ROOM_MANAGER.get_room(room_id)
+                    if current_room:
+                        await broadcast(current_room, {
+                            "type": "frame",
+                            "id": participant_id,
+                            "name": participant_name,
+                            "frame": str(data.get("frame", "")),
+                            "muted": bool(data.get("muted", False)),
+                        }, exclude_id=participant_id)
+                elif msg_type == "ping":
+                    await safe_send(ws, {"type": "pong"})
+                elif msg_type == "leave":
+                    break
+            elif msg.type in (WSMsgType.ERROR, WSMsgType.CLOSE):
                 break
 
     except asyncio.TimeoutError:
-        LOGGER.info("timeout waiting join")
-    except ConnectionClosed:
-        pass
+        LOGGER.info("timeout waiting for join: %s", participant_id)
     except Exception:
-        LOGGER.exception("unexpected server error")
+        LOGGER.exception("unexpected error")
     finally:
         if joined:
             room = await ROOM_MANAGER.leave(room_id, participant_id)
-            if room is not None:
+            if room:
                 await broadcast(room, {"type": "participant_leave", "id": participant_id})
             LOGGER.info("leave room=%s participant=%s(%s)", room_id, participant_name, participant_id)
 
-
-async def health_check_handler(connection, request):
-    """Handle HTTP health checks from Render/load balancers."""
-    if request.path == "/health" or request.method in ("HEAD", "GET"):
-        if request.path != "/" and not request.path.startswith("/room/"):
-            return connection.respond(http.HTTPStatus.OK, "OK\n")
-    # For /room/* paths and /, let websockets handle the upgrade
+    return ws
 
 
-async def run_server(host: str, port: int) -> None:
-    stop = asyncio.Future()
-
-    def _stop() -> None:
-        if not stop.done():
-            stop.set_result(None)
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, _stop)
-        except NotImplementedError:
-            pass
-
-    async with websockets.serve(
-        handle_client, host, port,
-        max_size=2**20,
-        ping_interval=20,
-        ping_timeout=20,
-        process_request=health_check_handler,
-    ):
-        LOGGER.info("ASCII Zoom server running on ws://%s:%s", host, port)
-        await stop
+def create_app() -> web.Application:
+    app = web.Application()
+    app.router.add_get("/", health_handler)
+    app.router.add_get("/health", health_handler)
+    app.router.add_get("/room/{room_id}", websocket_handler)
+    return app
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ASCII Zoom websocket server")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind (default: 0.0.0.0)")
-    parser.add_argument("--port", type=int, default=8765, help="Port to bind (default: 8765)")
+    parser = argparse.ArgumentParser(description="ASCII Zoom WebSocket server")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8765)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    try:
-        asyncio.run(run_server(args.host, args.port))
-    except KeyboardInterrupt:
-        pass
+    app = create_app()
+    LOGGER.info("ASCII Zoom server starting on %s:%s", args.host, args.port)
+    web.run_app(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
