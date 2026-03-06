@@ -158,6 +158,18 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                             "frame": str(data.get("frame", "")),
                             "muted": bool(data.get("muted", False)),
                         }, exclude_id=participant_id)
+                elif msg_type == "chat":
+                    text = str(data.get("text", "")).strip()
+                    if not text:
+                        continue
+                    current_room = await ROOM_MANAGER.get_room(room_id)
+                    if current_room:
+                        await broadcast(current_room, {
+                            "type": "chat",
+                            "id": participant_id,
+                            "name": participant_name,
+                            "text": text[:500],
+                        })
                 elif msg_type == "ping":
                     await safe_send(ws, {"type": "pong"})
                 elif msg_type == "leave":

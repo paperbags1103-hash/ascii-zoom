@@ -68,6 +68,52 @@
       align-items: start;
     }
 
+    .chat-panel {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .chat-title {
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      color: var(--fg);
+      font-size: 13px;
+    }
+
+    .chat-history {
+      height: 180px;
+      overflow-y: auto;
+      padding: 8px;
+      background: #000;
+      color: var(--fg);
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .chat-line {
+      margin-bottom: 4px;
+      color: var(--fg);
+      word-break: break-word;
+    }
+
+    .chat-line.own {
+      color: #6bffd2;
+    }
+
+    .chat-controls {
+      display: flex;
+      gap: 8px;
+      padding: 8px;
+      border-top: 1px solid var(--border);
+    }
+
+    .chat-controls input {
+      flex: 1;
+      min-width: 0;
+    }
+
     .tile {
       border: 1px solid var(--border);
       background: var(--panel);
@@ -185,15 +231,23 @@
   </div>
 
   <div class="grid" id="grid"></div>
+  <section class="chat-panel">
+    <div class="chat-title">Text Chat</div>
+    <div class="chat-history" id="chatHistory"></div>
+    <div class="chat-controls">
+      <input id="chatInput" type="text" maxlength="500" placeholder="Type a message...">
+      <button id="chatSendBtn" type="button">Send</button>
+    </div>
+  </section>
 
   <video id="video" class="hidden" autoplay playsinline muted></video>
-  <canvas id="capture" width="80" height="40" class="hidden"></canvas>
+  <canvas id="capture" width="120" height="55" class="hidden"></canvas>
 
   <script>
     (() => {
       const ASCII_CHARS = '$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,"^`. ';
-      const FRAME_WIDTH = 80;
-      const FRAME_HEIGHT = 40;
+      const FRAME_WIDTH = 120;
+      const FRAME_HEIGHT = 55;
       const FPS = 10;
       const FRAME_INTERVAL = 1000 / FPS;
       const RECONNECT_DELAY_MS = 2000;
@@ -226,6 +280,9 @@
         grid: document.getElementById('grid'),
         video: document.getElementById('video'),
         canvas: document.getElementById('capture'),
+        chatHistory: document.getElementById('chatHistory'),
+        chatInput: document.getElementById('chatInput'),
+        chatSendBtn: document.getElementById('chatSendBtn'),
       };
 
       const ctx = els.canvas.getContext('2d', { willReadFrequently: true });
@@ -272,19 +329,53 @@
         ctx.drawImage(v, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
         const img = ctx.getImageData(0, 0, FRAME_WIDTH, FRAME_HEIGHT).data;
         const chars = new Array(FRAME_HEIGHT);
+        const grays = new Float32Array(FRAME_WIDTH * FRAME_HEIGHT);
         const maxIdx = ASCII_CHARS.length - 1;
+        let minVal = 255;
+        let maxVal = 0;
+
+        for (let y = 0; y < FRAME_HEIGHT; y += 1) {
+          for (let x = 0; x < FRAME_WIDTH; x += 1) {
+            const pixelIndex = y * FRAME_WIDTH + x;
+            const i = pixelIndex * 4;
+            const gray = (img[i] * 0.299) + (img[i + 1] * 0.587) + (img[i + 2] * 0.114);
+            grays[pixelIndex] = gray;
+            if (gray < minVal) minVal = gray;
+            if (gray > maxVal) maxVal = gray;
+          }
+        }
 
         for (let y = 0; y < FRAME_HEIGHT; y += 1) {
           let row = '';
           for (let x = 0; x < FRAME_WIDTH; x += 1) {
-            const i = (y * FRAME_WIDTH + x) * 4;
-            const gray = (img[i] * 0.299) + (img[i + 1] * 0.587) + (img[i + 2] * 0.114);
-            const idx = Math.floor((gray / 255) * maxIdx);
+            const gray = grays[y * FRAME_WIDTH + x];
+            const stretched = ((gray - minVal) / (maxVal - minVal + 1)) * 255;
+            const enhanced = Math.pow(stretched / 255, 0.7) * 255;
+            const idx = Math.floor((enhanced / 255) * maxIdx);
             row += ASCII_CHARS[idx];
           }
           chars[y] = row;
         }
         return chars.join('\n');
+      }
+
+      function addChatMessage(name, text, own) {
+        const line = document.createElement('div');
+        line.className = own ? 'chat-line own' : 'chat-line';
+        line.textContent = `[${name}] ${text}`;
+        els.chatHistory.appendChild(line);
+        while (els.chatHistory.childElementCount > 200) {
+          els.chatHistory.removeChild(els.chatHistory.firstChild);
+        }
+        els.chatHistory.scrollTop = els.chatHistory.scrollHeight;
+      }
+
+      function sendChat() {
+        const text = els.chatInput.value.trim();
+        if (!text) return;
+        if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+        state.ws.send(JSON.stringify({ type: 'chat', text }));
+        els.chatInput.value = '';
       }
 
       function ensureTile(id, name) {
@@ -416,6 +507,12 @@
               renderFrame(data.id, data.name || 'Anonymous', data.frame || placeholder('WAITING'), !!data.muted);
               break;
             }
+            case 'chat': {
+              if (!data.text) break;
+              const own = !!(state.id && data.id && data.id === state.id);
+              addChatMessage(data.name || 'Anonymous', data.text, own);
+              break;
+            }
             default:
               break;
           }
@@ -484,6 +581,17 @@
         els.joinStatus.textContent = '';
         els.overlay.classList.add('hidden');
         boot(room, name);
+      });
+
+      els.chatSendBtn.addEventListener('click', () => {
+        sendChat();
+      });
+
+      els.chatInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          sendChat();
+        }
       });
 
       window.addEventListener('beforeunload', () => {

@@ -17,8 +17,8 @@ from websockets.exceptions import ConnectionClosed
 
 ASCII_CHARS = "$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,\"^`. "
 ASCII_LUT = np.array(list(ASCII_CHARS), dtype="<U1")
-FRAME_WIDTH = 60
-FRAME_HEIGHT = 30
+FRAME_WIDTH = 120
+FRAME_HEIGHT = 55
 TARGET_FPS = 10
 MAX_PARTICIPANTS = 8
 
@@ -33,6 +33,13 @@ class PeerState:
     muted: bool = False
 
 
+@dataclass
+class ChatMessage:
+    name: str
+    text: str
+    own: bool = False
+
+
 class CameraASCII:
     def __init__(self) -> None:
         try:
@@ -41,6 +48,8 @@ class CameraASCII:
         except Exception:
             self.cap = None
             self.available = False
+        self.clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        self.sharpen_kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
 
     def close(self) -> None:
         if self.cap is not None:
@@ -70,8 +79,13 @@ class CameraASCII:
             return self._placeholder("NO CAMERA")
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        small = cv2.resize(gray, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
-        idx = (small.astype(np.float32) * (len(ASCII_CHARS) - 1) / 255).astype(np.int32)
+        gray = cv2.resize(gray, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
+        gray = self.clahe.apply(gray)
+        edges = cv2.Canny(gray, 50, 150)
+        gray = cv2.addWeighted(gray, 0.7, edges, 0.3, 0)
+        gray = cv2.filter2D(gray, -1, self.sharpen_kernel)
+        gray = np.clip(gray, 0, 255).astype(np.uint8)
+        idx = (gray.astype(np.float32) * (len(ASCII_CHARS) - 1) / 255).astype(np.int32)
         mapped = ASCII_LUT[idx]
         return ["".join(row.tolist()) for row in mapped]
 
@@ -147,6 +161,9 @@ class CursesUI:
         my_id: str,
         my_frame: List[str],
         peers: Dict[str, PeerState],
+        chat_messages: List[ChatMessage],
+        chat_input_mode: bool,
+        chat_input: str,
         muted: bool,
         connected: bool,
     ) -> None:
@@ -176,8 +193,9 @@ class CursesUI:
         fit_addstr(self.pad, 2, 0, "├" + "─" * max(0, w - 2) + "┤", green)
 
         usable_top = 3
-        usable_bottom = max(usable_top + 1, h - 2)
-        usable_height = max(1, usable_bottom - usable_top)
+        chat_top = max(usable_top, h - 9)
+        grid_bottom = max(usable_top, chat_top - 1)
+        usable_height = max(1, grid_bottom - usable_top + 1)
 
         participant_items = [(my_id, PeerState(name=f"{self.name} (You)", frame_lines=my_frame, muted=muted))]
         for pid, peer in list(peers.items())[: MAX_PARTICIPANTS - 1]:
@@ -193,7 +211,7 @@ class CursesUI:
             x0 = c * tile_w
             y0 = usable_top + r * tile_h
             x1 = min(w - 1, x0 + tile_w - 1)
-            y1 = min(usable_bottom - 1, y0 + tile_h - 1)
+            y1 = min(grid_bottom, y0 + tile_h - 1)
             if y1 <= y0 or x1 <= x0:
                 continue
 
@@ -213,8 +231,27 @@ class CursesUI:
                 line = peer.frame_lines[line_idx]
                 fit_addstr(self.pad, start_y + line_idx, x0 + 1, line[:content_w], green)
 
+        fit_addstr(self.pad, chat_top, 0, "├" + "─" * max(0, w - 2) + "┤", green)
+
+        recent = chat_messages[-5:]
+        msg_y = chat_top + 1
+        for i in range(5):
+            if i < len(recent):
+                item = recent[i]
+                text = f"[{item.name}] {item.text}"
+                color = cyan if item.own else green
+                fit_addstr(self.pad, msg_y + i, 1, text, color)
+            else:
+                fit_addstr(self.pad, msg_y + i, 1, "", green)
+
+        chat_line = f"Chat> {chat_input}" if chat_input_mode else "Press Enter to chat (Esc to cancel)"
+        fit_addstr(self.pad, h - 3, 1, chat_line, yellow if chat_input_mode else cyan)
+
         status = "Connected" if connected else "Reconnecting..."
-        controls = f" [Q] Quit  [M] Mute Camera ({'ON' if muted else 'OFF'})  Status: {status} "
+        controls = (
+            f" [Q] Quit  [M] Mute Camera ({'ON' if muted else 'OFF'})"
+            f"  [Enter] Chat  Status: {status} "
+        )
         fit_addstr(self.pad, h - 2, 0, "├" + "─" * max(0, w - 2) + "┤", green)
         fit_addstr(self.pad, h - 1, 0, "│" + controls.ljust(max(0, w - 2))[: max(0, w - 2)] + "│", cyan)
 
@@ -232,6 +269,10 @@ class ASCIIZoomClient:
         self.connected = False
         self.my_id = "local"
         self.peers: Dict[str, PeerState] = {}
+        self.chat_messages: List[ChatMessage] = []
+        self.chat_input_mode = False
+        self.chat_input = ""
+        self.ws = None
         self.my_frame = [" " * FRAME_WIDTH for _ in range(FRAME_HEIGHT)]
         self.ui = CursesUI(room=room, name=name)
         self.camera = CameraASCII()
@@ -303,18 +344,61 @@ class ASCIIZoomClient:
                 name = str(data.get("name", default_name))
                 muted = bool(data.get("muted", False))
                 self.peers[pid] = PeerState(name=name, frame_lines=lines, muted=muted)
+            elif msg_type == "chat":
+                pid = str(data.get("id", ""))
+                name = str(data.get("name", "Anonymous"))
+                text = str(data.get("text", "")).strip()
+                if text:
+                    self.chat_messages.append(ChatMessage(name=name, text=text[:300], own=(pid == self.my_id)))
+                    self.chat_messages = self.chat_messages[-50:]
             elif msg_type == "error":
                 LOGGER.warning("Server error: %s", data.get("message", "unknown error"))
+
+    async def _send_chat(self, text: str) -> None:
+        if not self.ws or not self.connected:
+            return
+        try:
+            await self.ws.send(json.dumps({"type": "chat", "text": text[:500]}))
+        except ConnectionClosed:
+            pass
 
     async def _ui_loop(self) -> None:
         while self.running:
             key = self.ui.poll_key()
-            if key in (ord("q"), ord("Q")):
-                self.running = False
-                break
-            if key in (ord("m"), ord("M")):
-                self.muted = not self.muted
-            self.ui.render(self.my_id, self.my_frame, self.peers, self.muted, self.connected)
+            if self.chat_input_mode:
+                if key in (27,):  # ESC
+                    self.chat_input_mode = False
+                    self.chat_input = ""
+                elif key in (10, 13, curses.KEY_ENTER):
+                    text = self.chat_input.strip()
+                    if text:
+                        await self._send_chat(text)
+                    self.chat_input_mode = False
+                    self.chat_input = ""
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
+                    self.chat_input = self.chat_input[:-1]
+                elif 32 <= key <= 126:
+                    if len(self.chat_input) < 300:
+                        self.chat_input += chr(key)
+            else:
+                if key in (ord("q"), ord("Q")):
+                    self.running = False
+                    break
+                if key in (ord("m"), ord("M")):
+                    self.muted = not self.muted
+                elif key in (10, 13, curses.KEY_ENTER):
+                    self.chat_input_mode = True
+                    self.chat_input = ""
+            self.ui.render(
+                self.my_id,
+                self.my_frame,
+                self.peers,
+                self.chat_messages,
+                self.chat_input_mode,
+                self.chat_input,
+                self.muted,
+                self.connected,
+            )
             await asyncio.sleep(0.02)
 
     async def run(self) -> None:
@@ -338,6 +422,7 @@ class ASCIIZoomClient:
                 try:
                     room_url = self._room_url()
                     async with websockets.connect(room_url, ping_interval=20, ping_timeout=20, max_size=2**20) as ws:
+                        self.ws = ws
                         self.connected = True
                         await ws.send(json.dumps({"type": "join", "name": self.name}))
                         sender = asyncio.create_task(self._send_frames(ws))
@@ -355,6 +440,7 @@ class ASCIIZoomClient:
                     await asyncio.sleep(2)
                 finally:
                     self.connected = False
+                    self.ws = None
         finally:
             self.running = False
             ui_task.cancel()
