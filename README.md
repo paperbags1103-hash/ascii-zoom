@@ -2,96 +2,139 @@
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
-```text
-   ___   _____  _____ ___ ___   ____   ____   ____  __  __
-  / _ | / ___/ / ___/|_ _|_ _| /_  /  / __ \ / __ \|  \/  |
- / __ |/ /__  / /__   | | | |   / /_ / /_/ // /_/ /| |\/| |
-/_/ |_|\___/  \___/  |___|___| /___/ \____/ \____/ |_|  |_|
-
-Terminal-based ASCII video conferencing
+```
+   _   ___  ____ ___ ___   ____  ____  ____  __  __
+  /_\ / __||  __/|_ _|_ _| |_  / / __ \/ __ \|  \/  |
+ / _ \\__ \| |__  | | | |   / / / /_/ // /_/ /| |\/| |
+/_/ \_\___/|____||___|___| /___/ \____/ \____/ |_|  |_|
 ```
 
-Terminal-based ASCII video conferencing.
+**Terminal-based ASCII video conferencing.**  
+See your friends as ASCII art. No app install needed.
 
-## Demo Screenshot
+---
 
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ ASCII ZOOM | Room: dev-room | Participants: 2/8             │
-├──────────────────────────────────────────────────────────────┤
-│┌────────────────────────────┐┌──────────────────────────────┐│
-││ [gorba (You)]              ││ [friend]                     ││
-││$$@@BB%%88&&MM##**ooaahhkk  ││  ..''^^",,;;ii!!~~--__++<<  ││
-││ddppqqwwZZ00QQLLCCJJUUYYXX  ││  (({{[[??//\\||11ttffrrnn   ││
-││zzccvvuunnxxrrjjfftt/\\|()  ││  WWM##**oahkbdpqwmZO0QLCJU   ││
-│└────────────────────────────┘└──────────────────────────────┘│
-├──────────────────────────────────────────────────────────────┤
-│ [Q] Quit  [M] Mute Camera (OFF)  Status: Connected          │
-└──────────────────────────────────────────────────────────────┘
-```
+## ✨ Features
 
-## Quick Start
+- 🎥 **Live webcam → ASCII art** in real-time
+- 💬 **Text chat** built-in (no separate app needed)
+- 🌐 **Browser client** — works on iPhone, iPad, any browser (no install)
+- 💻 **Terminal client** — Python CLI for maximum hacker vibes
+- 🏠 **Multi-room** — create unlimited private rooms with a room name
+- 👥 **Up to 8 participants** per room
+- 🔒 **No accounts** — just a room name and your name
+- 🆓 **Free** — hosted on Render.com free tier
 
-1. Install dependencies
+---
+
+## 🚀 Quick Start (Browser)
+
+Just open in any browser — no installation needed:
+
+**https://ascii-zoom.onrender.com**
+
+1. Enter a room name (e.g. `myroom`) — anyone with the same name joins your room
+2. Enter your display name
+3. Click **Join** → allow camera access
+4. Share the room name with friends
+
+> Works on iPhone Safari, iPad, Chrome, Firefox, Edge.
+
+---
+
+## 💻 Terminal Client (Python)
+
+For the full hacker terminal experience:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+# Install dependencies
+pip install opencv-python websockets
+
+# macOS/Linux
+pip install opencv-python websockets
+python3 client.py --server wss://ascii-zoom.onrender.com --room myroom --name "YourName"
+
+# Windows (extra step needed)
+pip install opencv-python websockets windows-curses
+curl -o client.py https://raw.githubusercontent.com/paperbags1103-hash/ascii-zoom/master/client.py
+python client.py --server wss://ascii-zoom.onrender.com --room myroom --name "YourName"
 ```
 
-2. Start server
+### Terminal Controls
+
+| Key | Action |
+|-----|--------|
+| `Q` | Quit |
+| `M` | Mute/unmute camera |
+| `Enter` | Focus chat input |
+| `Esc` | Cancel chat input |
+
+---
+
+## 🐳 Self-Hosting with Docker
 
 ```bash
-python3 server.py --host 0.0.0.0 --port 8765
-```
-
-3. Join room
-
-```bash
-python3 client.py --server ws://localhost:8765 --room myroom --name "gorba"
-```
-
-## Public Server Option
-
-Deploy the server on Fly.io (`fly.toml` included) and share the URL:
-
-```bash
-python3 client.py --server wss://<your-fly-app>.fly.dev --room myroom --name "guest"
-```
-
-## Web Client (iPhone / iPad / Browser)
-
-Open https://ascii-zoom.onrender.com in any browser.
-Enter your name and room — no installation needed.
-
-## Self-Hosting With Docker
-
-```bash
+git clone https://github.com/paperbags1103-hash/ascii-zoom.git
+cd ascii-zoom
 docker build -t ascii-zoom .
 docker run --rm -p 8765:8765 ascii-zoom
 ```
 
-## Controls
+Connect with your own server:
+```bash
+python3 client.py --server ws://localhost:8765 --room myroom --name "YourName"
+# or browser: http://localhost:8765
+```
 
-- `Q`: Quit
-- `M`: Mute/unmute camera
+---
 
-## How It Works
+## ☁️ Deploy to Fly.io
 
-OpenCV + WebRTC-style real-time capture idea -> WebSocket transport -> curses terminal renderer.
+```bash
+fly launch --name ascii-zoom-yourname
+fly deploy
+```
 
-Each client captures webcam frames, converts grayscale pixels to ASCII characters, and streams the result to others in the same room.
+---
 
-## Contributing
+## 🏗️ Architecture
 
-Issues and pull requests are welcome.
+```
+Browser/Terminal Client
+        ↕ WebSocket (wss://)
+   aiohttp Server
+        ↕ asyncio broadcast
+   All participants in room
+```
 
-1. Fork the repo
-2. Create a feature branch
-3. Add or update tests where needed
-4. Open a pull request with a clear description
+- **Server**: Python + aiohttp (WebSocket + HTTP in one process)
+- **Client (terminal)**: Python + OpenCV + curses
+- **Client (browser)**: Vanilla JS + getUserMedia + Canvas
+- **Image processing**: CLAHE contrast enhancement + Canny edge detection + sharpening kernel
+- **Protocol**: JSON messages (`join`, `frame`, `chat`, `participant_join`, `participant_leave`)
+- **Frame size**: 120×55 chars per participant
 
-## License
+---
 
-Licensed under the MIT License. See `LICENSE`.
+## 🔧 How It Works
+
+1. Each client captures webcam frames (10 FPS)
+2. Frames are converted to ASCII using a 70-character grayscale gradient
+3. Contrast is enhanced with CLAHE + edge detection to make faces pop
+4. ASCII frames are sent to the server via WebSocket
+5. Server broadcasts each participant's frame to all others in the room
+6. Each client renders the grid of participants in real-time
+
+---
+
+## 📦 Requirements
+
+**Server**: Python 3.9+, aiohttp  
+**Terminal client**: Python 3.9+, opencv-python, websockets, numpy  
+**Browser client**: Modern browser with `getUserMedia` support (Chrome, Safari, Firefox)
+
+---
+
+## 📄 License
+
+MIT © 2026 gorba
