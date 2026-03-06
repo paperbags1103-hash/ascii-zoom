@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: ascii-zoom
+    runtime: python
+    region: singapore  # closest to Korea
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 server.py --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0

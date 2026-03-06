@@ -1,15 +1,14 @@
-app = "ascii-zoom"
-primary_region = "nrt"  # Tokyo, closest to Korea
+app = "ascii-zoom-gorba"
+primary_region = "nrt"
 
 [build]
 
 [http_service]
   internal_port = 8765
-  force_https = false
+  force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
   min_machines_running = 0
-  protocols = ["tcp"]
 
 [[vm]]
   memory = "256mb"
