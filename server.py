@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+from pathlib import Path
 import signal
 import uuid
 from dataclasses import dataclass, field
@@ -56,6 +57,8 @@ class RoomManager:
 
 
 ROOM_MANAGER = RoomManager()
+BASE_DIR = Path(__file__).resolve().parent
+INDEX_HTML = BASE_DIR / "static" / "index.html"
 
 
 async def safe_send(ws: web.WebSocketResponse, payload: dict) -> bool:
@@ -80,6 +83,12 @@ async def broadcast(room: Room, payload: dict, exclude_id: Optional[str] = None)
 
 async def health_handler(request: web.Request) -> web.Response:
     return web.Response(text="OK", status=200)
+
+
+async def app_handler(request: web.Request) -> web.FileResponse:
+    if not INDEX_HTML.exists():
+        raise web.HTTPNotFound(reason="static/index.html not found")
+    return web.FileResponse(INDEX_HTML)
 
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
@@ -172,7 +181,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
 def create_app() -> web.Application:
     app = web.Application()
-    app.router.add_get("/", health_handler)
+    app.router.add_get("/", app_handler)
+    app.router.add_get("/app", app_handler)
     app.router.add_get("/health", health_handler)
     app.router.add_get("/room/{room_id}", websocket_handler)
     return app

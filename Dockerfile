@@ -3,5 +3,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 COPY server.py .
+COPY static/ static/
 EXPOSE 8765
 CMD ["python3", "server.py", "--host", "0.0.0.0", "--port", "8765"]

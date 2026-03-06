@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ASCII Zoom</title>
+  <style>
+    :root {
+      --bg: #000;
+      --fg: #00ff5a;
+      --fg-dim: #00c246;
+      --panel: #031003;
+      --border: #0a4d1f;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      min-height: 100%;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: "Courier New", Courier, monospace;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding: max(10px, env(safe-area-inset-top)) 10px max(10px, env(safe-area-inset-bottom));
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      justify-content: space-between;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      padding: 8px;
+    }
+
+    .meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 14px;
+    }
+
+    button {
+      background: transparent;
+      color: var(--fg);
+      border: 1px solid var(--fg-dim);
+      padding: 6px 10px;
+      font-family: inherit;
+      font-size: 14px;
+    }
+
+    button:active { transform: scale(0.98); }
+
+    .grid {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      align-items: start;
+    }
+
+    .tile {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      min-height: 220px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .name {
+      padding: 6px 8px;
+      border-bottom: 1px solid var(--border);
+      color: var(--fg);
+      font-size: 13px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    pre {
+      margin: 0;
+      padding: 8px;
+      white-space: pre;
+      overflow: auto;
+      line-height: 1;
+      font-size: clamp(5px, 1.6vw, 10px);
+      flex: 1;
+      color: var(--fg);
+      background: #000;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.9);
+      padding: 12px;
+      z-index: 10;
+    }
+
+    .card {
+      width: min(100%, 420px);
+      border: 1px solid var(--fg-dim);
+      background: var(--panel);
+      padding: 14px;
+    }
+
+    .card h1 {
+      margin: 0 0 10px;
+      font-size: 18px;
+      color: var(--fg);
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 10px;
+      gap: 4px;
+      font-size: 13px;
+    }
+
+    input {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: #000;
+      color: var(--fg);
+      padding: 8px;
+      font-family: inherit;
+      font-size: 15px;
+    }
+
+    .status {
+      font-size: 12px;
+      color: var(--fg-dim);
+      min-height: 16px;
+      margin-top: 6px;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    @media (max-width: 740px) {
+      .grid { grid-template-columns: 1fr; }
+      pre { font-size: clamp(5px, 1.9vw, 8px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="overlay" id="joinOverlay">
+    <form class="card" id="joinForm" autocomplete="on">
+      <h1>ASCII ZOOM</h1>
+      <label class="field">
+        Room
+        <input id="roomInput" name="room" type="text" maxlength="64" required placeholder="myroom">
+      </label>
+      <label class="field">
+        Name
+        <input id="nameInput" name="name" type="text" maxlength="32" required placeholder="guest">
+      </label>
+      <button type="submit">Join</button>
+      <div class="status" id="joinStatus"></div>
+    </form>
+  </div>
+
+  <div class="toolbar">
+    <div class="meta">
+      <span id="roomLabel">Room: -</span>
+      <span id="participantCount">Participants: 0</span>
+      <span id="connectionStatus">Status: offline</span>
+    </div>
+    <button id="muteBtn" type="button">Mute: OFF</button>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <video id="video" class="hidden" autoplay playsinline muted></video>
+  <canvas id="capture" width="80" height="40" class="hidden"></canvas>
+
+  <script>
+    (() => {
+      const ASCII_CHARS = '$@B%8&WM#*oahkbdpqwmZO0QLCJUYXzcvunxrjft/\\|()1{}[]?-_+~<>i!lI;:,"^`. ';
+      const FRAME_WIDTH = 80;
+      const FRAME_HEIGHT = 40;
+      const FPS = 10;
+      const FRAME_INTERVAL = 1000 / FPS;
+      const RECONNECT_DELAY_MS = 2000;
+      const LOCAL_PLACEHOLDER_ID = 'local-pending';
+
+      const state = {
+        room: '',
+        name: '',
+        id: null,
+        muted: false,
+        ws: null,
+        reconnectTimer: null,
+        sendTimer: null,
+        participants: new Map(),
+        localFrame: '',
+        hasCamera: false,
+        shouldReconnect: true,
+      };
+
+      const els = {
+        overlay: document.getElementById('joinOverlay'),
+        form: document.getElementById('joinForm'),
+        roomInput: document.getElementById('roomInput'),
+        nameInput: document.getElementById('nameInput'),
+        joinStatus: document.getElementById('joinStatus'),
+        roomLabel: document.getElementById('roomLabel'),
+        participantCount: document.getElementById('participantCount'),
+        connectionStatus: document.getElementById('connectionStatus'),
+        muteBtn: document.getElementById('muteBtn'),
+        grid: document.getElementById('grid'),
+        video: document.getElementById('video'),
+        canvas: document.getElementById('capture'),
+      };
+
+      const ctx = els.canvas.getContext('2d', { willReadFrequently: true });
+
+      function wsUrl(room) {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${proto}//${window.location.host}/room/${encodeURIComponent(room)}`;
+      }
+
+      function setStatus(text) {
+        els.connectionStatus.textContent = `Status: ${text}`;
+      }
+
+      function updateParticipantCount() {
+        els.participantCount.textContent = `Participants: ${state.participants.size}`;
+      }
+
+      function placeholder(text) {
+        const lines = Array.from({ length: FRAME_HEIGHT }, () => ' '.repeat(FRAME_WIDTH));
+        const row = Math.floor(FRAME_HEIGHT / 2);
+        const banner = ` ${text} `;
+        const start = Math.max(0, Math.floor((FRAME_WIDTH - banner.length) / 2));
+        const chars = lines[row].split('');
+        for (let i = 0; i < banner.length && start + i < FRAME_WIDTH; i += 1) {
+          chars[start + i] = banner[i];
+        }
+        lines[row] = chars.join('');
+        return lines.join('\n');
+      }
+
+      function imageToAscii() {
+        if (state.muted) {
+          return placeholder('CAMERA MUTED');
+        }
+        if (!state.hasCamera) {
+          return placeholder('NO CAMERA');
+        }
+
+        const v = els.video;
+        if (!v.videoWidth || !v.videoHeight) {
+          return placeholder('NO CAMERA');
+        }
+
+        ctx.drawImage(v, 0, 0, FRAME_WIDTH, FRAME_HEIGHT);
+        const img = ctx.getImageData(0, 0, FRAME_WIDTH, FRAME_HEIGHT).data;
+        const chars = new Array(FRAME_HEIGHT);
+        const maxIdx = ASCII_CHARS.length - 1;
+
+        for (let y = 0; y < FRAME_HEIGHT; y += 1) {
+          let row = '';
+          for (let x = 0; x < FRAME_WIDTH; x += 1) {
+            const i = (y * FRAME_WIDTH + x) * 4;
+            const gray = (img[i] * 0.299) + (img[i + 1] * 0.587) + (img[i + 2] * 0.114);
+            const idx = Math.floor((gray / 255) * maxIdx);
+            row += ASCII_CHARS[idx];
+          }
+          chars[y] = row;
+        }
+        return chars.join('\n');
+      }
+
+      function ensureTile(id, name) {
+        let part = state.participants.get(id);
+        if (!part) {
+          const tile = document.createElement('section');
+          tile.className = 'tile';
+          const title = document.createElement('div');
+          title.className = 'name';
+          const pre = document.createElement('pre');
+          pre.textContent = placeholder('WAITING');
+          tile.appendChild(title);
+          tile.appendChild(pre);
+          els.grid.appendChild(tile);
+
+          part = { id, name, tile, title, pre, muted: false, frame: '' };
+          state.participants.set(id, part);
+        }
+        part.name = name;
+        part.title.textContent = part.muted ? `${name} (muted)` : name;
+        updateParticipantCount();
+        return part;
+      }
+
+      function removeTile(id) {
+        const part = state.participants.get(id);
+        if (!part) return;
+        part.tile.remove();
+        state.participants.delete(id);
+        updateParticipantCount();
+      }
+
+      function renderFrame(id, name, frame, muted) {
+        const part = ensureTile(id, name);
+        part.muted = !!muted;
+        part.frame = frame || placeholder('WAITING');
+        part.title.textContent = part.muted ? `${part.name} (muted)` : part.name;
+        part.pre.textContent = part.frame;
+      }
+
+      function pruneParticipants(validIds) {
+        for (const id of Array.from(state.participants.keys())) {
+          if (!validIds.has(id)) {
+            removeTile(id);
+          }
+        }
+      }
+
+      function stopSendLoop() {
+        if (state.sendTimer) {
+          clearInterval(state.sendTimer);
+          state.sendTimer = null;
+        }
+      }
+
+      function startSendLoop() {
+        stopSendLoop();
+        state.sendTimer = setInterval(() => {
+          const frame = imageToAscii();
+          state.localFrame = frame;
+          if (state.id) {
+            renderFrame(state.id, `${state.name} (You)`, frame, state.muted);
+          }
+          if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+            state.ws.send(JSON.stringify({ type: 'frame', frame, muted: state.muted }));
+          }
+        }, FRAME_INTERVAL);
+      }
+
+      function scheduleReconnect() {
+        if (!state.shouldReconnect || state.reconnectTimer) return;
+        state.reconnectTimer = setTimeout(() => {
+          state.reconnectTimer = null;
+          connectWebSocket();
+        }, RECONNECT_DELAY_MS);
+      }
+
+      function connectWebSocket() {
+        if (!state.room || !state.name) return;
+        setStatus('connecting');
+
+        const socket = new WebSocket(wsUrl(state.room));
+        state.ws = socket;
+
+        socket.addEventListener('open', () => {
+          setStatus('connected');
+          socket.send(JSON.stringify({ type: 'join', name: state.name }));
+          startSendLoop();
+        });
+
+        socket.addEventListener('message', (event) => {
+          let data;
+          try {
+            data = JSON.parse(event.data);
+          } catch (_) {
+            return;
+          }
+
+          switch (data.type) {
+            case 'welcome': {
+              state.id = data.id;
+              if (state.id !== LOCAL_PLACEHOLDER_ID) {
+                removeTile(LOCAL_PLACEHOLDER_ID);
+              }
+              ensureTile(state.id, `${state.name} (You)`);
+              const validIds = new Set([state.id]);
+              (data.participants || []).forEach((p) => {
+                if (p.id === state.id) return;
+                ensureTile(p.id, p.name || 'Anonymous');
+                validIds.add(p.id);
+              });
+              pruneParticipants(validIds);
+              updateParticipantCount();
+              break;
+            }
+            case 'participant_join': {
+              const p = data.participant || {};
+              if (!p.id) break;
+              ensureTile(p.id, p.name || 'Anonymous');
+              break;
+            }
+            case 'participant_leave': {
+              if (data.id) removeTile(data.id);
+              break;
+            }
+            case 'frame': {
+              if (!data.id) break;
+              if (state.id && data.id === state.id) break;
+              renderFrame(data.id, data.name || 'Anonymous', data.frame || placeholder('WAITING'), !!data.muted);
+              break;
+            }
+            default:
+              break;
+          }
+        });
+
+        socket.addEventListener('close', () => {
+          setStatus('disconnected');
+          stopSendLoop();
+          scheduleReconnect();
+        });
+
+        socket.addEventListener('error', () => {
+          setStatus('error');
+          socket.close();
+        });
+      }
+
+      async function setupCamera() {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: 'user',
+              width: { ideal: 640 },
+              height: { ideal: 480 }
+            },
+            audio: false,
+          });
+          els.video.srcObject = stream;
+          await els.video.play();
+          state.hasCamera = true;
+        } catch (_) {
+          state.hasCamera = false;
+          state.localFrame = placeholder('NO CAMERA');
+        }
+      }
+
+      function boot(room, name) {
+        state.room = room;
+        state.name = name;
+        state.id = null;
+        els.roomLabel.textContent = `Room: ${room}`;
+        ensureTile(LOCAL_PLACEHOLDER_ID, `${name} (You)`);
+        renderFrame(LOCAL_PLACEHOLDER_ID, `${name} (You)`, placeholder('STARTING'), state.muted);
+
+        setupCamera().finally(() => {
+          if (!state.hasCamera) {
+            renderFrame(LOCAL_PLACEHOLDER_ID, `${name} (You)`, placeholder('NO CAMERA'), false);
+          }
+          connectWebSocket();
+        });
+      }
+
+      els.muteBtn.addEventListener('click', () => {
+        state.muted = !state.muted;
+        els.muteBtn.textContent = `Mute: ${state.muted ? 'ON' : 'OFF'}`;
+      });
+
+      els.form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const room = els.roomInput.value.trim();
+        const name = els.nameInput.value.trim();
+        if (!room || !name) {
+          els.joinStatus.textContent = 'Room and name are required.';
+          return;
+        }
+        els.joinStatus.textContent = '';
+        els.overlay.classList.add('hidden');
+        boot(room, name);
+      });
+
+      window.addEventListener('beforeunload', () => {
+        state.shouldReconnect = false;
+        stopSendLoop();
+        if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+          state.ws.send(JSON.stringify({ type: 'leave' }));
+          state.ws.close();
+        }
+      });
+
+      updateParticipantCount();
+      setStatus('offline');
+    })();
+  </script>
+</body>
+</html>

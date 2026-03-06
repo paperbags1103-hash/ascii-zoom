@@ -60,6 +60,11 @@ Deploy the server on Fly.io (`fly.toml` included) and share the URL:
 python3 client.py --server wss://<your-fly-app>.fly.dev --room myroom --name "guest"
 ```
 
+## Web Client (iPhone / iPad / Browser)
+
+Open https://ascii-zoom.onrender.com in any browser.
+Enter your name and room — no installation needed.
+
 ## Self-Hosting With Docker
 
 ```bash
